@@ -5,6 +5,8 @@ from Bio.Seq import Seq
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import FeatureLocation, CompoundLocation
+import re
+
 
 # fasta extensions bansed on https://en.wikipedia.org/wiki/FASTA_format
 gen_seq_extensions = ['.fasta', '.fastq', '.fna', '.ffn', '.faa', '.frn']
@@ -50,8 +52,26 @@ class GenomicItemBase(ItemBase):
 
 class GenSeqFileProcessor(PreProcessor):
     "`PreProcessor` that opens the filenames and read the fastas."
-    def process_one(self,item):
-        return gen_seq_reader(item) if isinstance(item, Path) else item
+    def process_one(self,item) -> Seq:
+        content = gen_seq_reader(item['file'])
+        for record in content:
+            if content[record].id == item['id']:
+                return content[record].seq
+        return None
+
+    def process(self, items:Collection) -> Collection[Seq]:
+        df = pd.DataFrame(data=list(items), columns=['file', 'description', "id", "name"])
+        multi_fastas = df.groupby("file").agg({"id": list})
+        print(multi_fastas.head())
+        res = []
+        for row in multi_fastas.index.values:
+            content = gen_seq_reader(str(row))
+            for record in content:
+                if content[record].id in multi_fastas.loc[row,'id']:
+                    res.append(content[record].seq)
+        return res
+
+
 
 ##=====================================
 ## DataBunch
@@ -87,43 +107,31 @@ class GenSeqList(ItemList):
     _bunch, _processor = FastaDataBunch, GenSeqFileProcessor
 
     @classmethod
-    def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None, **kwargs) -> ItemList:
+    def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None, **kwargs) -> 'GenSeqList':
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
-        return super().from_folder(path=path, extensions=extensions, **kwargs)
+        files=super().from_folder(path=path, extensions=extensions, **kwargs)
+        res = []
+        for file in files:
+            content = gen_seq_reader(file)
+            res += [{"file":str(file),'description':content[r].description, 'id':content[r].id, 'name':content[r].name}
+                    for r in content.keys()]
+        return cls(res)
 
-
+    def by_regex(self, expr:str, attr='description') -> 'GenSeqList':
+        """Select sequences matching regular expression over metadata attribute.
+        Available attributes ```file, id,name, description```
+        """
+        p = re.compile(expr)
+        return GenSeqList(list(filter(lambda x: p.search(x[attr]), self)))
 
 if __name__ == '__main__':
-    import time
-    # fn = "/data/genomes/fromKurt/genome_fastas/GCF_000005845.2_ASM584v2_genomic.fna"
-    # fn = '/data/genomes/fromKurt/genome_fastas/GCF_000156695.2_ASM15669v2_genomic.fna'
-    # files = get_fasta_files('/data/genomes/fromKurt/genome_fastas/')
 
-    # files = get_fasta_files('/data/genomes/LaBrock/20190502_output-20190512T025719Z-003/20190502_output/Basal-1-2016-A1_TAAGGCGA-GCGTAAGA_L008_R1_001.gz/')
+    items = GenSeqList.from_folder("/data/genomes/GenSeq_fastas/valid")
+    print(items.by_regex('v2_*',"file"))
+    GenSeqFileProcessor().process(items)
+    # print(GenSeqFileProcessor().process_one(items[0]))
 
-    items = GenSeqList.from_folder("/data/genomes/GenSeq_fastas")
-    print("ItemList: ", items)
-    bunch = FastaDataBunch.from_folder("/data/genomes/GenSeq_fastas")
-    print("DataBunch", bunch)
 
-    # data = {}
-    # for file in files:
-    #     print(f'file={file}')
-    #     parser = SeqIO.parse(file, 'fastq')
-    #     # res=(rec for rec in parser)
-    #     start_time = time.time()
-    #     data = list(parser)
-    #     print("--- %s seconds ---" % (time.time() - start_time))
-    #     print(len(data))
-    #     print(data[1:3])
-
-    # for record in parser:
-    #     print (record)
-    #     data[record.description] = record
-    #     print(f'data = id={record.description}, len={len(record.seq)}')
-    # print(len(data))
-    # print(data.keys())
-    # seq = Fasta(fn)
-    # print (len(seq))
-    # print([s.id for s in seq])
+    # bunch = FastaDataBunch.from_folder("/data/genomes/GenSeq_fastas")
+    # print("DataBunch", bunch)
