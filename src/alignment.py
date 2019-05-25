@@ -1,3 +1,14 @@
+from fastai import *
+from fastai.text import *
+from Bio import Seq
+from Bio.Seq import Seq
+from Bio import SeqIO
+from Bio.SeqRecord import SeqRecord
+from Bio.SeqFeature import FeatureLocation, CompoundLocation
+
+
+""" 
+Sample 
 data = (AlignmentsItemList.from_folder(bam_sam_folder)
         #Where are the sequences? -> in ```bam_sam_folder``` and its subfolders
         .generate_missing_index(),
@@ -6,22 +17,25 @@ data = (AlignmentsItemList.from_folder(bam_sam_folder)
         #select metachondria, chromosome, etc.
         .toFasta(),
         #generate fasta sequence from alignment
-# .do_not_label()
+        .do_not_label(),
         #create empty labels for unsupervised learning tasks
         .databunch(bs=16, collate_fn=bb_pad_collate))
         #Finally we convert to a DataBunch, use a batch size of 16,
         # and we use bb_pad_collate to collate the data into a mini-batch
+"""
+
 
 ##=====================================
 ## ItemBase classes
 ##=====================================
 
-class AlignmentIndexBase(ItemBase)
+class AlignmentIndexBase(ItemBase):
+    pass
 
 class AlignmentItemBase(ItemBase):
-    def __init__(self, file:path, generate_index=False):
-        self.alignments = self.load(file)
-        self.seq_index = seq, seq_index
+    """an alignment item contains an alignment record tracked in bai index file as n_ref"""
+    def __init__(self,n_ref:str, seq:str, qual:str,  cigar:object, meta:dict):
+        self.n_ref, self.seq, self.qual, self.cigar, self.meta = n_ref, seq, cigar, meta
 
     def loadAlighment(self, file):
         pass
@@ -41,14 +55,20 @@ class AlignmentItemBase(ItemBase):
 
 
 class AlignmentFileProcessor(PreProcessor):
-    "`PreProcessor` that opens the filenames and read the fastas."
+    "`PreProcessor` that opens the filenames and read alignment files."
     def process_one(self,item):
-        return gen_seq_reader(item) if isinstance(item, Path) else item
+        return bam_reader(item) if isinstance(item, Path) else item
 
 
 class AlignmentItemList(ItemList):
     "Special `ItemList` for BAM/SAM alignment files"
     _bunch = AlignmentDataBunch
+    _sequencer,_indexer, _cygar_processor =  SequenceProcessor, IndexProcessor, CygarProcessor
+    _is_compressed = True
+    _in_memory = False
+
+    def from_file(self, file):
+
 
     def do_not_label(self, **kwargs):
         "A special labelling method for unsupervised learning"
