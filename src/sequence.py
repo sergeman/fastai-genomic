@@ -167,24 +167,16 @@ class GSUDataBunch(DataBunch):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
         path = Path(path).absolute()
-        src = GSList.from_folder(path=path, regex=regex, attr=attr)
-
         tok = Tokenizer(tok_func=partial(GSTokenizer, ngram=ngram, skip=skip), n_cpus=n_cpus)
-        GSFileProcessor().process(src)
-        GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields).process(src)
-        GSNumericalizeProcessor(vocab=vocab, max_vocab=max_vocab, min_freq=min_freq).process(src)
-        src = src.split_none()
-        src = src.label_empty()
+        processor = [GSFileProcessor(),
+                      GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
+                      GSNumericalizeProcessor(vocab=vocab, max_vocab=max_vocab, min_freq=min_freq)]
+        src = ItemLists(path, GSList.from_folder(path=path, regex=regex, attr=attr,processor=processor),
+                              ItemList(items=[],ignore_empty=True))
+        # src=src.split_none()
+        src=src.label_empty()
         if test is not None: src.add_test_folder(path / test)
-        dl = src.databunch(**kwargs)
-        # datasets = cls._init_ds(d1.train_ds, d1.valid_ds, d1.test_ds)
-        # val_bs = bs
-        # datasets = [
-        #     LanguageModelPreLoader(ds, shuffle=(i == 0), bs=(bs if i == 0 else val_bs), bptt=bptt, backwards=False)
-        #     for i, ds in enumerate(datasets)]
-        # dls = [DataLoader(d, b, shuffle=False) for d, b in zip(datasets, (bs, val_bs, val_bs, val_bs)) if d is not None]
-        #
-        # return cls(*dls, path=path, collate_fn=collate_fn, no_check=False)
+        return src.databunch(**kwargs)
 
 ##=====================================
 ## Item List
@@ -192,11 +184,17 @@ class GSUDataBunch(DataBunch):
 
 class GSList(ItemList):
     "`ItemList` suitable for genomic sequence analysis."
-    _bunch, _processor = GSUDataBunch, GSFileProcessor
+    _bunch, _processor = GSUDataBunch, [GSFileProcessor, GSTokenizeProcessor, GSNumericalizeProcessor]
+
+    def __init__(self, items:Iterator, vocab:Vocab=None, pad_idx:int=1, **kwargs):
+        super().__init__(items, **kwargs)
+        self.vocab,self.pad_idx = vocab,pad_idx
+        self.copy_new += ['vocab', 'pad_idx']
+
 
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
-                    regex:str="", attr='description', **kwargs) -> ItemList:
+                    regex:str="", attr='description', vocab:GSVocab=None, **kwargs) -> ItemList:
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
         files = super().from_folder(path=path, extensions=extensions, **kwargs)
@@ -206,21 +204,11 @@ class GSList(ItemList):
             res += [
                 {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
                 for r in content.keys()]
-        return cls(items=list(filter(lambda x: re.compile(regex).search(x[attr]), res) if expr != "" else res, path=path)
+        return cls(items=list(filter(lambda x: re.compile(regex).search(x[attr]), res)) if regex != "" else res,
+                   path=path, vocab=vocab)
 
 
 if __name__ == '__main__':
-    # items = GSList.from_folder("/data/genomes/GenSeq_fastas/valid")
-    # # print(items.by_regex('v2_*',"file"))
-    # fastas = GSFileProcessor().process(items)
-    # # tokenizer = GenSeqTokenizer(ngram=6, skip=6)
-    # tokens = [tokenizer.tokenizer(seq) for seq in fastas]
 
-    # tok = Tokenizer(tok_func=partial(GSTokenizer, ngram=8, skip=8), pre_rules=[], post_rules=[], n_cpus=4)
-    # GSTokenizeProcessor(tokenizer=tok).process(fastas)
-    # print(GenSeqFileProcessor().process_one(items[0]))
-    # src = GSList(NumericalizeProcessor( max_vocab=100000, min_freq=3).process(src))
-    # print(src)
     bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    a=10
-    print(res)
+    print(bunch)
