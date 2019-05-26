@@ -164,7 +164,7 @@ class Dna2VecProcessor(PreProcessor):
     "`PreProcessor` that tokenizes the texts in `ds`."
 
     def __init__(self, ds: ItemList = None, agg:Callable=sum,
-                 filepath:str='../../pretrained/dna2vec-20161219-0153-k3to8-100d-10c-29320Mbp-sliding-Xat.w2v'):
+                 filepath:str='~/.fastai/models/pretrained/dna2vec-20161219-0153-k3to8-100d-10c-29320Mbp-sliding-Xat.w2v'):
         self.agg, self.embedding = agg, MultiKModel(filepath)
 
     def process_one(self, item):
@@ -173,7 +173,8 @@ class Dna2VecProcessor(PreProcessor):
     def process(self, ds):
         res=[]
         for item in ds.items:
-            vectors = self.embedding.data[ds.ngram].model[item]
+            bases = list(filter(lambda x: set(x) == set('ATGC'), item))
+            vectors = self.embedding.data[ds.ngram].model[bases] if len(bases) > 0 else np.asarray([[0.]*100,[0.]*100])
             res.append(vectors if self.agg is None else self.agg(vectors))
         ds.items = res
 
@@ -214,7 +215,7 @@ class Dna2VecDataBunch(DataBunch):
     def from_folder(cls, path: PathOrStr, train: str = 'train', valid: str = 'valid', test: Optional[str] = None,
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None,
                     chunksize: int = 1000, mark_fields: bool = False,
-                    regex:str = "", attr="description", n_cpus: int = None,
+                    regex:str = "", attr="description", n_cpus: int = 1,
                     ngram: int = 8, skip: int = 0, agg:Callable=None, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
@@ -263,9 +264,9 @@ class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
 
-    def __init__(self, items:Iterator,path, ngram:int=8, agg:Callable=None, **kwargs):
+    def __init__(self, items:Iterator,path, ngram:int=8, agg:Callable=None, n_cpus=7, **kwargs):
         super().__init__(items, path, **kwargs)
-        self.ngram,self.agg = ngram,agg
+        self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
 
 
     @classmethod
@@ -283,11 +284,13 @@ class Dna2VecList(ItemList):
         return cls(items=list(filter(lambda x: re.compile(regex).search(x[attr]), res)) if regex != "" else res,
                    path=path,ngram=ngram,agg=agg, **kwargs)
 
+    # def process(self, processor):
+
 
 
 if __name__ == '__main__':
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid",n_cpus=7,agg=sum)
+    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid",n_cpus=7,agg=partial(np.mean, axis=0))
     print(bunch)
 
