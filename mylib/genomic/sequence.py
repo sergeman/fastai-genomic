@@ -51,14 +51,6 @@ def gen_seq_reader(fn: PathOrStr):
     ext = str(fn).split(".")[-1]
     return SeqIO.to_dict(SeqIO.parse(fn, gen_seq_formats[ext]))
 
-def _genomic_join_texts(texts: Collection[str], mark_fields: bool = False):
-    if not isinstance(texts, np.ndarray): texts = np.array(texts)
-    if is1d(texts): texts = texts[:, None]
-    df = pd.DataFrame({i: texts[:, i] for i in range(texts.shape[1])})
-    text_col = f'{BOS} {FLD} {1} ' + df[0].astype(str) if mark_fields else '' + df[0].astype(str)
-    for i in range(1, len(df.columns)):
-        text_col += (f' {FLD} {i + 1} ' if mark_fields else ' ') + df[i].astype(str)
-    return text_col.values
 
 
 ##=====================================
