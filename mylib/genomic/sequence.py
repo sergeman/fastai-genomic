@@ -83,7 +83,7 @@ class GSFileProcessor(PreProcessor):
                 if content[record].id in multi_fastas.loc[row, 'id']:
                     res.append(content[record].seq)
         ds.items = apply_filters(res,self.filters)
-        return ds.items
+        # return ds.items
 
 class GSTokenizer():
     def __init__(self, ngram=8, skip=0, n_cpus=1):
@@ -260,6 +260,22 @@ def apply_filters(items:Collection,filters:Union[Callable, Collection[Callable]]
     return items
 
 
+
+
+def fasta_content(this, filters):
+    dicts = []
+    for file in this.items:
+        content = gen_seq_reader(file)
+        dicts += [
+            {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
+            for r in content.keys()]
+    this.items = apply_filters(dicts, filters)
+    this.descriptions = [item['description'] for item in list(this.items)]
+    this.ids = [item['id'] for item in list(this.items)]
+    this.names = [item['name'] for item in list(this.items)]
+    this.files = [item['file'] for item in list(this.items)]
+    return this
+
 class GSList(ItemList):
     "`ItemList`of numericalised genomic sequences."
     _bunch, _processor = GSUDataBunch, [GSFileProcessor, GSTokenizeProcessor, GSNumericalizeProcessor]
@@ -290,9 +306,10 @@ class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
 
-    def __init__(self, items:Iterator,path, ngram:int=8, agg:Callable=None, n_cpus=7, **kwargs):
+    def __init__(self, items:Iterator, path, ngram:int=8, agg:Callable=None, n_cpus=7, **kwargs):
         super().__init__(items, path, **kwargs)
         self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
+        self.descriptions=self.ids=self.names=self.files=None
 
 
     @classmethod
@@ -300,20 +317,14 @@ class Dna2VecList(ItemList):
                     filters:Collection[Callable]=None, ngram:int=8, agg:Callable=None, **kwargs) -> ItemList:
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
-        files = super().from_folder(path=path, extensions=extensions, **kwargs)
-        items = []
-        for file in files.items:
-            content = gen_seq_reader(file)
-            items += [{"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
-                    for r in content.keys()]
-        return cls(items=apply_filters(items, filters), path=path,ngram=ngram,agg=agg, **kwargs)
-
+        this = super().from_folder(path=path, extensions=extensions, **kwargs)
+        return fasta_content(this,filters)
 
 
 if __name__ == '__main__':
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid",
+    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/test",
                                          filters=[partial(count_filter, max_count=3, sample="last")],
                                          n_cpus=7,agg=partial(np.mean, axis=0))
     print(bunch)
