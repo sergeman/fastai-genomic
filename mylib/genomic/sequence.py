@@ -229,8 +229,12 @@ class Dna2VecDataBunch(DataBunch):
 ##=====================================
 
 
-def regex_filter(items:Collection, target:str="description", regex:str="") -> Collection:
-    return list(filter(lambda x: re.compile(regex).search(x[target]), items)) if regex != "" else items
+def regex_filter(items:Collection, rx:str= "", target:str= "description", search=True, keep=True) -> Collection:
+    if rx== "": return itmes
+    rx = re.compile(rx)
+    if search: return list(filter(lambda x: rx.search(x[target]) if keep else  not rx.search(x[target]), items))
+    return list(filter(lambda x: rx.match(x[target]) if keep else not rx.match(x[target]), items))
+
 
 def id_filter(items:Collection, ids:Collection)->Collection:
     return [i for i in list(items) if i['id'] in ids]
