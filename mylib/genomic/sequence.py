@@ -7,6 +7,7 @@ from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import FeatureLocation, CompoundLocation
 import re
 from dna2vec.multi_k_model import MultiKModel
+import random
 
 
 # fasta extensions bansed on https://en.wikipedia.org/wiki/FASTA_format
@@ -62,8 +63,8 @@ class GSFileProcessor(PreProcessor):
     reads fasta and returns sequences with IDs provided by the item.
     """
 
-    def __init__(self, ds: ItemList = None):
-        self.ds = ds
+    def __init__(self, ds: ItemList = None, filters=None):
+        self.ds,self.filters = ds, filters
 
     def process_one(self, item) -> Seq:
         content = gen_seq_reader(item['file'])
@@ -81,8 +82,8 @@ class GSFileProcessor(PreProcessor):
             for record in content:
                 if content[record].id in multi_fastas.loc[row, 'id']:
                     res.append(content[record].seq)
-        ds.items = res
-        return res
+        ds.items = apply_filters(res,self.filters)
+        return ds.items
 
 class GSTokenizer():
     def __init__(self, ngram=8, skip=0, n_cpus=1):
@@ -185,8 +186,8 @@ class GSUDataBunch(DataBunch):
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None, vocab: Vocab = None,
                     chunksize: int = 10000,
                     max_vocab: int = 70000, min_freq: int = 2, mark_fields: bool = False, include_bos: bool = True,
-                    include_eos: bool = False,
-                    regex:str = "", attr="description", n_cpus: int = None, ngram: int = 8, skip: int = 0, **kwargs):
+                    filters:Collection[Callable] = None,
+                    include_eos: bool = False, n_cpus: int = None, ngram: int = 8, skip: int = 0, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
         path = Path(path).absolute()
@@ -194,7 +195,7 @@ class GSUDataBunch(DataBunch):
         processor = [GSFileProcessor(),
                       GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
                       GSNumericalizeProcessor(vocab=vocab, max_vocab=max_vocab, min_freq=min_freq)]
-        src = ItemLists(path, GSList.from_folder(path=path, regex=regex, attr=attr,processor=processor),
+        src = ItemLists(path, GSList.from_folder(path=path, filters = filters ,processor=processor),
                               ItemList(items=[],ignore_empty=True))
         src=src.label_empty()
         if test is not None: src.add_test_folder(path / test)
@@ -207,7 +208,7 @@ class Dna2VecDataBunch(DataBunch):
     def from_folder(cls, path: PathOrStr, train: str = 'train', valid: str = 'valid', test: Optional[str] = None,
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None,
                     chunksize: int = 1000, mark_fields: bool = False,
-                    regex:str = "", attr="description", n_cpus: int = 1,
+                    filters:Collection[Callable] = None, n_cpus: int = 1,
                     ngram: int = 8, skip: int = 0, agg:Callable=None, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
@@ -216,8 +217,8 @@ class Dna2VecDataBunch(DataBunch):
         processor = [GSFileProcessor(),
                      GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
                      Dna2VecProcessor(agg=agg)]
-        src = ItemLists(path, Dna2VecList.from_folder(path=path, regex=regex, attr=attr,processor=processor),
-                              ItemList(items=[],ignore_empty=True))
+        src = ItemLists(path, Dna2VecList.from_folder(path=path, filters=filters, processor=processor),
+                        ItemList(items=[],ignore_empty=True))
         src=src.label_empty()
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
@@ -226,6 +227,38 @@ class Dna2VecDataBunch(DataBunch):
 ##=====================================
 ## Item List
 ##=====================================
+
+
+def regex_filter(items:Collection, target:str="description", regex:str="") -> Collection:
+    return list(filter(lambda x: re.compile(regex).search(x[target]), items)) if regex != "" else items
+
+def id_filter(items:Collection, ids:Collection)->Collection:
+    return [i for i in list(items) if i['id'] in ids]
+
+def name_filter(items:Collection, names:Collection)->Collection:
+    return [i for i in list(items) if i['name'] in names]
+
+def count_filter(items:Collection, max_count:int=5, sample:str="first") -> Collection:
+    df = pd.DataFrame(data=list(items), columns=['file', 'description', "id", "name"])
+    df_agg = df.groupby("file").agg({"id": list})
+    selected_ids = []
+    for file in iter(df_agg.index):
+        ids = df_agg.loc[file,"id"]
+        if len(ids) > max_count:
+            selected_ids += ids[:max_count] if sample == "first" else ids[-max_count:]
+                # if sample == "last" else ids[random.sample(range(0, len(ids)), max_count)]
+        else:
+            selected_ids += ids
+    return id_filter(items, selected_ids)
+
+
+
+def apply_filters(items:Collection,filters:Union[Callable, Collection[Callable]]=None) -> Collection:
+    if filters is None: return items
+    if callable(filters): return filters(items)
+    for f in filters: items = f(items)
+    return items
+
 
 class GSList(ItemList):
     "`ItemList`of numericalised genomic sequences."
@@ -239,18 +272,19 @@ class GSList(ItemList):
 
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
-                    regex:str="", attr='description', vocab:GSVocab=None, **kwargs) -> ItemList:
+                    filters:Union[Callable, Collection[Callable]]=None, vocab:GSVocab=None, **kwargs) -> ItemList:
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
         files = super().from_folder(path=path, extensions=extensions, **kwargs)
         res = []
-        for file in files:
+        for file in files.items:
             content = gen_seq_reader(file)
-            res += [
+            items += [
                 {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
                 for r in content.keys()]
-        return cls(items=list(filter(lambda x: re.compile(regex).search(x[attr]), res)) if regex != "" else res,
-                   path=path, vocab=vocab, **kwargs)
+        return cls(items=apply_filters(items, filters), path=path, vocab=vocab, **kwargs)
+
+
 
 class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
@@ -263,26 +297,24 @@ class Dna2VecList(ItemList):
 
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
-                    regex:str="", attr='description', ngram:int=8, agg:Callable=None, **kwargs) -> ItemList:
+                    filters:Collection[Callable]=None, ngram:int=8, agg:Callable=None, **kwargs) -> ItemList:
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
         files = super().from_folder(path=path, extensions=extensions, **kwargs)
-        res = []
-        for file in files:
+        items = []
+        for file in files.items:
             content = gen_seq_reader(file)
-            res += [
-                {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
-                for r in content.keys()]
-        return cls(items=list(filter(lambda x: re.compile(regex).search(x[attr]), res)) if regex != "" else res,
-                   path=path,ngram=ngram,agg=agg, **kwargs)
-
-    # def process(self, processor):
+            items += [{"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
+                    for r in content.keys()]
+        return cls(items=apply_filters(items, filters), path=path,ngram=ngram,agg=agg, **kwargs)
 
 
 
 if __name__ == '__main__':
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid",n_cpus=7,agg=partial(np.mean, axis=0))
+    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid",
+                                         filters=[partial(count_filter, max_count=3, sample="last")],
+                                         n_cpus=7,agg=partial(np.mean, axis=0))
     print(bunch)
 
