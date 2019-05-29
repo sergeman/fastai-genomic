@@ -195,8 +195,8 @@ class GSUDataBunch(DataBunch):
         processor = [GSFileProcessor(),
                       GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
                       GSNumericalizeProcessor(vocab=vocab, max_vocab=max_vocab, min_freq=min_freq)]
-        src = ItemLists(path, GSList.from_folder(path=path, filters = filters ,processor=processor),
-                              ItemList(items=[],ignore_empty=True))
+        src = ItemLists(path, NumericalizedGSList.from_folder(path=path, filters = filters, processor=processor),
+                        ItemList(items=[],ignore_empty=True))
         src=src.label_empty()
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
@@ -280,7 +280,7 @@ def fasta_content(this, filters):
     this.files = [item['file'] for item in list(this.items)]
     return this
 
-class GSList(ItemList):
+class NumericalizedGSList(ItemList):
     "`ItemList`of numericalised genomic sequences."
     _bunch, _processor = GSUDataBunch, [GSFileProcessor, GSTokenizeProcessor, GSNumericalizeProcessor]
 
@@ -295,14 +295,8 @@ class GSList(ItemList):
                     filters:Union[Callable, Collection[Callable]]=None, vocab:GSVocab=None, **kwargs) -> ItemList:
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
-        files = super().from_folder(path=path, extensions=extensions, **kwargs)
-        res = []
-        for file in files.items:
-            content = gen_seq_reader(file)
-            items += [
-                {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
-                for r in content.keys()]
-        return cls(items=apply_filters(items, filters), path=path, vocab=vocab, **kwargs)
+        this = super().from_folder(path=path, extensions=extensions, **kwargs)
+        return cls(items=fasta_content(this,filters), path=path, vocab=vocab, **kwargs)
 
 
 
