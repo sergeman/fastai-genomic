@@ -168,7 +168,9 @@ class Dna2VecProcessor(PreProcessor):
         for item in ds.items:
             bases = list(filter(lambda x: set(x) == set('ATGC'), item))
             vectors = self.embedding.data[ds.ngram].model[bases] if len(bases) > 0 else np.asarray([[0.]*100,[0.]*100])
-            res.append(vectors if self.agg is None else self.agg(vectors))
+
+            aggregate=vectors if self.agg is None else self.agg(vectors)
+            res.append(aggregate)
         ds.items = res
 
 
