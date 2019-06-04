@@ -211,7 +211,7 @@ class Dna2VecDataBunch(DataBunch):
     def from_folder(cls, path: PathOrStr, train: str = 'train', valid: str = 'valid', test: Optional[str] = None,
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None,
                     chunksize: int = 1000, mark_fields: bool = False,
-                    filters:Collection[Callable] = None, n_cpus: int = 1,
+                    filters:Collection[Callable] = None, labeler:Callable=None, n_cpus: int = 1,
                     ngram: int = 8, skip: int = 0, agg:Callable=None, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
@@ -220,11 +220,14 @@ class Dna2VecDataBunch(DataBunch):
         processor = [GSFileProcessor(),
                      GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
                      Dna2VecProcessor(agg=agg)]
-        src = ItemLists(path, Dna2VecList.from_folder(path=path, filters=filters, processor=processor),
-                        ItemList(items=[],ignore_empty=True))
-        src=src.label_empty()
+        train_items = Dna2VecList.from_folder(path=path/train, filters=filters, processor=processor)
+        valid_items = Dna2VecList([]) if valid is None else Dna2VecList.from_folder(path=path/valid, filters=filters, processor=processor)
+        src = ItemLists(path, train_items, valid_items)
+                        # ItemList(items=[],ignore_empty=True))
+        src=src.label_from_lists(train_labels=labler(train_items), valid_labels=labeler(valid_items))
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
+
 
 
 ##=====================================
@@ -329,6 +332,14 @@ class Dna2VecList(ItemList):
         self.files = [item['file'] for item in list(self.items)]
         return self
 
+    def label_from_description(self, labeler:Callable):
+        return list(map(labeler, self.descriptions))
+
+    def numericalize_labels(self, labels:Collection, vocab:dict=None):
+        if vocab is None: vocab = {word:number for (word, number) in zip(set(labels), range(len(set(labels))))}
+        return [vocab[x] for x in labels], vocab
+        # return labels if label_vocab is None else  map(lambda x: label_vocab[x], labels)
+
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
                     filters:Collection[Callable]=None, ngram:int=8, n_cpus=1, agg:Callable=None, **kwargs) -> ItemList:
@@ -343,8 +354,12 @@ class Dna2VecList(ItemList):
 if __name__ == '__main__':
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/test",
-                                         filters=[partial(count_filter, keep=3, sample="last")],
-                                         n_cpus=7,agg=partial(np.mean, axis=0))
-    print(bunch)
+    # bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/test",
+    #                                      filters=[partial(count_filter, keep=3, sample="last")],
+    #                                      n_cpus=7,agg=partial(np.mean, axis=0))
+    # print(bunch)
 
+    data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas/valid")
+    labels,vocab = data.numericalize_labels(data.label_from_description(lambda x: x.split()[1]))
+    print(vocab)
+    print(labels)
