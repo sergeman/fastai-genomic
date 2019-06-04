@@ -122,7 +122,8 @@ class GSTokenizeProcessor(PreProcessor):
 
     def process(self, ds):
         tokens = []
-        for i in range(0, len(ds), self.chunksize):
+        if len(ds.items) < self.chunksize: ds.items = self.tokenizer._process_all_1(ds.items); return
+        for i in range(0, len(ds.items), self.chunksize):
             tokens += self.tokenizer.process_all(ds.items[i:i + self.chunksize])
         ds.items = tokens
 
@@ -232,7 +233,7 @@ class Dna2VecDataBunch(DataBunch):
 
 
 def regex_filter(items:Collection, rx:str= "", target:str= "description", search=True, keep=True) -> Collection:
-    if rx== "": return itmes
+    if rx== "": return items
     rx = re.compile(rx)
     if search: return list(filter(lambda x: rx.search(x[target]) if keep else  not rx.search(x[target]), items))
     return list(filter(lambda x: rx.match(x[target]) if keep else not rx.match(x[target]), items))
@@ -244,43 +245,47 @@ def id_filter(items:Collection, ids:Collection)->Collection:
 def name_filter(items:Collection, names:Collection)->Collection:
     return [i for i in list(items) if i['name'] in names]
 
-def count_filter(items:Collection, max_count:int=5, sample:str="first") -> Collection:
+def count_filter(items:Collection, num_fastas:tuple=(1, None), keep:int=None, sample:str= "first") -> Collection:
     df = pd.DataFrame(data=list(items), columns=['file', 'description', "id", "name"])
     df_agg = df.groupby("file").agg({"id": list})
     selected_ids = []
     for file in iter(df_agg.index):
         ids = df_agg.loc[file,"id"]
-        if len(ids) > max_count:
-            selected_ids += ids[:max_count] if sample == "first" else ids[-max_count:]
-                # if sample == "last" else ids[random.sample(range(0, len(ids)), max_count)]
-        else:
+        if len(ids) < num_fastas[0]: continue
+        if num_fastas[1] is not None and len(ids) > num_fastas[1]: continue
+        if keep is None:
             selected_ids += ids
-    return id_filter(items, selected_ids)
+        else:
+            selected_ids += ids[:min([keep, len(ids)])] if sample == "first" else ids[-min([keep, len(ids)]):]
+    res= id_filter(items=items, ids=selected_ids)
+    return res
+
+def total_count_filter(items:Collection, parser:Callable,num_fastas:tuple=(1, None), keep:int=None, sample:str= "first") -> Collection:
+
+    df = pd.DataFrame(data=list(items), columns=['file', 'description', "id", "name"])
+    df_agg = df.groupby("file").agg({"id": list})
+    selected_ids = []
+    for file in iter(df_agg.index):
+        ids = df_agg.loc[file,"id"]
+        if len(ids) < num_fastas[0]: continue
+        if num_fastas[1] is not None and len(ids) > num_fastas[1]: continue
+        if keep is None:
+            selected_ids += ids
+        else:
+            selected_ids += ids[:min([keep, len(ids)])] if sample == "first" else ids[-min([keep, len(ids)]):]
+    res= id_filter(items=items, ids=selected_ids)
+    return res
+
+
+def apply_filters(dicts:Collection, filters:Union[Callable, Collection[Callable]]=None) -> Collection:
+    if filters is None: return dicts
+    if callable(filters): return filters(items=dicts)
+    for f in filters: dicts = f(items=dicts)
+    return dicts
 
 
 
-def apply_filters(items:Collection,filters:Union[Callable, Collection[Callable]]=None) -> Collection:
-    if filters is None: return items
-    if callable(filters): return filters(items)
-    for f in filters: items = f(items)
-    return items
 
-
-
-
-def fasta_content(this, filters):
-    dicts = []
-    for file in this.items:
-        content = gen_seq_reader(file)
-        dicts += [
-            {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
-            for r in content.keys()]
-    this.items = apply_filters(dicts, filters)
-    this.descriptions = [item['description'] for item in list(this.items)]
-    this.ids = [item['id'] for item in list(this.items)]
-    this.names = [item['name'] for item in list(this.items)]
-    this.files = [item['file'] for item in list(this.items)]
-    return this
 
 class NumericalizedGSList(ItemList):
     "`ItemList`of numericalised genomic sequences."
@@ -301,7 +306,6 @@ class NumericalizedGSList(ItemList):
         return cls(items=fasta_content(this,filters), path=path, vocab=vocab, **kwargs)
 
 
-
 class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
@@ -309,23 +313,38 @@ class Dna2VecList(ItemList):
     def __init__(self, items:Iterator, path, ngram:int=8, agg:Callable=None, n_cpus=7, **kwargs):
         super().__init__(items, path, **kwargs)
         self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
-        self.descriptions=self.ids=self.names=self.files=None
+        self.descriptions=self.ids=self.names=self.files=None,None,None,None
 
+    def fasta_content(self, filters):
+        dicts = []
+        for file in self.items:
+            content = gen_seq_reader(file)
+            dicts += [
+                {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
+                for r in content.keys()]
+        self.items = apply_filters(dicts, filters)
+        self.descriptions = [item['description'] for item in list(self.items)]
+        self.ids = [item['id'] for item in list(self.items)]
+        self.names = [item['name'] for item in list(self.items)]
+        self.files = [item['file'] for item in list(self.items)]
+        return self
 
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
-                    filters:Collection[Callable]=None, ngram:int=8, agg:Callable=None, **kwargs) -> ItemList:
+                    filters:Collection[Callable]=None, ngram:int=8, n_cpus=1, agg:Callable=None, **kwargs) -> ItemList:
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
-        return fasta_content(this,filters)
+        return this.fasta_content(filters)
 
+    def store_by_genus(self,path):
+        pass
 
 if __name__ == '__main__':
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
     bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas/test",
-                                         filters=[partial(count_filter, max_count=3, sample="last")],
+                                         filters=[partial(count_filter, keep=3, sample="last")],
                                          n_cpus=7,agg=partial(np.mean, axis=0))
     print(bunch)
 
