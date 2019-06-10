@@ -8,7 +8,8 @@ from Bio.SeqFeature import FeatureLocation, CompoundLocation
 import re
 from dna2vec.multi_k_model import MultiKModel
 import random
-
+from pathlib import Path
+import os
 
 # fasta extensions bansed on https://en.wikipedia.org/wiki/FASTA_format
 gen_seq_extensions = ['.fasta', '.fastq', '.fna', '.ffn', '.faa', '.frn']
@@ -232,7 +233,7 @@ class Dna2VecDataBunch(DataBunch):
 
 
 
-def regex_filter(items:Collection, rx:str= "", target:str= "description", search=True, keep=True) -> Collection:
+def regex_filter(items:Collection, rx:str= "", target:str= "description", search=True, keep:bool=True) -> Collection:
     if rx== "": return items
     rx = re.compile(rx)
     if search: return list(filter(lambda x: rx.search(x[target]) if keep else  not rx.search(x[target]), items))
@@ -260,6 +261,13 @@ def count_filter(items:Collection, num_fastas:tuple=(1, None), keep:int=None, sa
     res= id_filter(items=items, ids=selected_ids)
     return res
 
+def seq_len_filter(items:Collection, len:tuple=(1, None), keep:bool=True) -> Collection:
+    """filters sequence by length. ```len``` tuple is (min,max) values for filtering, ```keep``` controls """
+    selected_ids=[i["id"] for i in items if (i["len"] >= len[0] and (len[1] is None or i["len"] < len[1])) == keep]
+    res= id_filter(items=items, ids=selected_ids)
+    return res
+
+
 def total_count_filter(items:Collection, parser:Callable,num_fastas:tuple=(1, None), keep:int=None, sample:str= "first") -> Collection:
 
     df = pd.DataFrame(data=list(items), columns=['file', 'description', "id", "name"])
@@ -282,9 +290,6 @@ def apply_filters(dicts:Collection, filters:Union[Callable, Collection[Callable]
     if callable(filters): return filters(items=dicts)
     for f in filters: dicts = f(items=dicts)
     return dicts
-
-
-
 
 
 class NumericalizedGSList(ItemList):
@@ -313,21 +318,28 @@ class Dna2VecList(ItemList):
     def __init__(self, items:Iterator, path, ngram:int=8, agg:Callable=None, n_cpus=7, **kwargs):
         super().__init__(items, path, **kwargs)
         self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
-        self.descriptions,self.ids,self.names,self.files,self.label_vocab= None, None, None, None, None
+        self.descriptions,self.ids,self.names,self.files,self.label_vocab,self.lengths= None, None, None, None, None,None
+        ### TODO: replace label_vocab with instance of fastai.transform.Vocab class
 
     def fasta_content(self, filters):
         dicts = []
         for file in self.items:
             content = gen_seq_reader(file)
             dicts += [
-                {"file": str(file), 'description': content[r].description, 'id': content[r].id, 'name': content[r].name}
+                {"file": str(file),
+                 'description': content[r].description,
+                 'id': content[r].id,
+                 'name': content[r].name,
+                 "len":len(content[r].seq)}
                 for r in content.keys()]
         self.items = apply_filters(dicts, filters)
         self.descriptions = [item['description'] for item in list(self.items)]
         self.ids = [item['id'] for item in list(self.items)]
         self.names = [item['name'] for item in list(self.items)]
         self.files = [item['file'] for item in list(self.items)]
+        self.lengths = [item["len"] for item in list(self.items)]
         return self
+
 
     def label_from_description(self, labeler:Callable, labels:Collection=None, vocab:dict=None, **kwargs):
         lbls=list(map(labeler, self.descriptions))
@@ -343,18 +355,35 @@ class Dna2VecList(ItemList):
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
         return this.fasta_content(filters)
 
-    def store_by_genus(self,path):
+    @classmethod
+    def preprocess_for_dna2vec_training(cls, out_path:Union[str, Path], **kwargs):
+        p = Path(out_path) if isinstance(out_path, str) else out_path
+        data = cls.from_folder(**kwargs)
+        GSFileProcessor().process(data)
+        if not os.path.exists(str(p)):
+            os.makedirs(str(p))
+        for i, seq in enumerate(iter(data.items)):
+            record = SeqRecord(seq,id=data.ids[i], name=data.names[i],description=data.descriptions[i])
+            with open(p / f"{data.ids[i]}.fasta", "w") as output:
+                output.write(record.format("fasta"))
+
+    @classmethod
+    def store_by_label_class(self,path):
+        """store fasta into multi-fasta files label class """
         pass
 
 if __name__ == '__main__':
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas",
-                                         filters=[partial(count_filter, keep=3, sample="last")],
-                                         labeler=lambda x: x.split()[1],
-                                         n_cpus=7,agg=partial(np.mean, axis=0))
-    print(bunch)
+    # bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas",
+    #                                      filters=[partial(count_filter, keep=3, sample="last")],
+    #                                      labeler=lambda x: x.split()[1],
+    #                                      n_cpus=7,agg=partial(np.mean, axis=0))
+    # print(bunch)
 
-    # data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas")
+    Dna2VecList.preprocess_for_dna2vec_training(out_path="/data/genomes/dna2vec_train",
+                                                       path="/data/genomes/GenSeq_fastas",
+                                                       filters=[partial(regex_filter, rx="plasmid", keep=False),
+                                                                partial(seq_len_filter, len=(100000,None))])
     # data.label_from_description(lambda x: x.split()[1], from_item_lists=True)
     # print(data)
