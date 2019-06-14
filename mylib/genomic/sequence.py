@@ -8,44 +8,18 @@ from Bio.SeqFeature import FeatureLocation, CompoundLocation
 import re
 from dna2vec.multi_k_model import MultiKModel
 import random
+from gensim.models import Word2Vec
 from pathlib import Path
 import os
 
 # fasta extensions bansed on https://en.wikipedia.org/wiki/FASTA_format
-gen_seq_extensions = ['.fasta', '.fastq', '.fna', '.ffn', '.faa', '.frn']
-gen_seq_formats = {"fasta": "fasta", "fna": "fasta", "ffn": "fasta", "faa": "fasta", "frn": "fasta",
+gen_seq_extensions = ['.fasta', '.fastq', '.fna', '.ffn', '.faa', '.frn','.fa']
+gen_seq_formats = {"fasta": "fasta", "fna": "fasta", "ffn": "fasta", "faa": "fasta", "frn": "fasta","fa":"fasta",
                    "fastq": "fastq"}
-
-
-def get_fasta_files(c: PathOrStr, check_ext: bool = True, recurse=False) -> FilePathList:
-    "Return list of files in `c` that are fasta data files. `check_ext` will filter to `image_extensions`."
-    return get_files(c, extensions=(gen_seq_extensions if check_ext else None), recurse=recurse)
-
 
 def ifnone(a: Any, b: Any) -> Any:
     "`a` if `a` is not None, otherwise `b`."
     return b if a is None else a
-
-
-def download_fasta(url, dest, timeout=4):
-    try:
-        r = download_url(url, dest, overwrite=True, show_progress=False, timeout=timeout)
-    except Exception as e:
-        print(f"Error {url} {e}")
-
-
-def _download_fasta_inner(dest, url, i, timeout=4):
-    suffix = re.findall(r'\.\w+?(?=(?:\?|$))', url)
-    suffix = suffix[0] if len(suffix) > 0 else '.jpg'
-    download_fasta(url, dest / f"{i:08d}{suffix}", timeout=timeout)
-
-
-def download_fastas(urls: Collection[str], dest: PathOrStr, max_files: int = 1000, max_workers: int = 8, timeout=4):
-    "Download fastas listed in text file `urls` to path `dest`, at most `max_pics`"
-    urls = open(urls).read().strip().split("\n")[:max_files]
-    dest = Path(dest)
-    dest.mkdir(exist_ok=True)
-    parallel(partial(_download_image_inner, dest, timeout=timeout), urls, max_workers=max_workers)
 
 
 def gen_seq_reader(fn: PathOrStr):
@@ -53,6 +27,12 @@ def gen_seq_reader(fn: PathOrStr):
     ext = str(fn).split(".")[-1]
     return SeqIO.to_dict(SeqIO.parse(fn, gen_seq_formats[ext]))
 
+def seq_record(fn: PathOrStr, record_id:str):
+    content = gen_seq_reader(fn)
+    for record in content:
+        if content[record].id == record_id:
+            return content[record].seq
+    return None
 
 
 ##=====================================
@@ -68,14 +48,10 @@ class GSFileProcessor(PreProcessor):
         self.ds,self.filters = ds, filters
 
     def process_one(self, item) -> Seq:
-        content = gen_seq_reader(item['file'])
-        for record in content:
-            if content[record].id == item['id']:
-                return content[record].seq
-        return None
+        return seq_record(item["file"], item["id"])
 
     def process(self, ds: Collection) -> Collection[Seq]:
-        df = pd.DataFrame(data=list(ds), columns=['file', 'description', "id", "name"])
+        df = pd.DataFrame(data=list(ds.items), columns=['file', 'description', "id", "name"])
         multi_fastas = df.groupby("file").agg({"id": list})
         res = []
         for row in multi_fastas.index.values:
@@ -118,8 +94,8 @@ class GSTokenizeProcessor(PreProcessor):
                  mark_fields: bool = False):
         self.tokenizer, self.chunksize, self.mark_fields = ifnone(tokenizer, GSTokenizer(ngram=ngram, skip=skip)), chunksize, mark_fields
 
-    def process_one(self, item):
-        return self.tokenizer.tokenizer(item)
+    def process_one(self, sequence):
+        return self.tokenizer.tokenizer(str(sequence))
 
     def process(self, ds):
         tokens = []
@@ -158,22 +134,19 @@ class GSNumericalizeProcessor(PreProcessor):
 class Dna2VecProcessor(PreProcessor):
     "`PreProcessor` that tokenizes the texts in `ds`."
 
-    def __init__(self, ds: ItemList = None, agg:Callable=sum,
-                 filepath:str='~/.fastai/models/pretrained/dna2vec-20161219-0153-k3to8-100d-10c-29320Mbp-sliding-Xat.w2v'):
-        self.agg, self.embedding = agg, MultiKModel(filepath)
 
-    def process_one(self, item):
-        return embedding.vector(item)
+    def __init__(self, ds: ItemList = None, agg:Callable=sum,
+                 filepath:str='~/.fastai/models/pretrained/dna2vec-20161219-0153-k3to8-100d-10c-29320Mbp-sliding-Xat.w2v',
+                 emb=None):
+        self.agg, self.emb = agg, Word2Vec.load_word2vec_format(filepath) if emb is None else emb
+
+    def process_one(self, tokens):
+        tokens= list(filter(lambda x: set(x) == set('ATGC'), tokens))
+        vectors = self.emb[tokens] if len(tokens) > 0 else np.asarray([[0.] * 100, [0.] * 100])
+        return vectors if self.agg is None else self.agg(vectors)
 
     def process(self, ds):
-        res=[]
-        for item in ds.items:
-            bases = list(filter(lambda x: set(x) == set('ATGC'), item))
-            vectors = self.embedding.data[ds.ngram].model[bases] if len(bases) > 0 else np.asarray([[0.]*100,[0.]*100])
-
-            aggregate=vectors if self.agg is None else self.agg(vectors)
-            res.append(aggregate)
-        ds.items = res
+        ds.items = [self.process_one(item) for item in ds.items]
 
 
 
@@ -268,21 +241,15 @@ def seq_len_filter(items:Collection, len:tuple=(1, None), keep:bool=True) -> Col
     return res
 
 
-def total_count_filter(items:Collection, parser:Callable,num_fastas:tuple=(1, None), keep:int=None, sample:str= "first") -> Collection:
+def total_count_filter(items:Collection, parser:Callable,num_fastas:tuple=(1, None), balance:bool=True) -> Collection:
+    """Counts items for category extracted by parser.
+    Subsamples overrepresented categories to match max amount of samples in the least represented category  """
+    pass
 
-    df = pd.DataFrame(data=list(items), columns=['file', 'description', "id", "name"])
-    df_agg = df.groupby("file").agg({"id": list})
-    selected_ids = []
-    for file in iter(df_agg.index):
-        ids = df_agg.loc[file,"id"]
-        if len(ids) < num_fastas[0]: continue
-        if num_fastas[1] is not None and len(ids) > num_fastas[1]: continue
-        if keep is None:
-            selected_ids += ids
-        else:
-            selected_ids += ids[:min([keep, len(ids)])] if sample == "first" else ids[-min([keep, len(ids)]):]
-    res= id_filter(items=items, ids=selected_ids)
-    return res
+
+def describe(items:Collection) -> dict:
+    """compute statistics for items in the list"""
+    pass
 
 
 def apply_filters(dicts:Collection, filters:Union[Callable, Collection[Callable]]=None) -> Collection:
@@ -315,13 +282,18 @@ class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
 
-    def __init__(self, items:Iterator, path, ngram:int=8, agg:Callable=None, n_cpus=7, **kwargs):
+    def __init__(self, items:Iterator, path, ngram:int=8, n_cpus:int=7,
+                 emb:Union[Path,str,Word2Vec]="../data/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
+                 agg:Callable=partial(np.mean, axis=0), #mean values of dna2vec embedding vectors for all k-mers in genome
+                **kwargs):
         super().__init__(items, path, **kwargs)
         self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
+        self.emb = emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb)
         self.descriptions,self.ids,self.names,self.files,self.label_vocab,self.lengths= None, None, None, None, None,None
-        ### TODO: replace label_vocab with instance of fastai.transform.Vocab class
 
-    def fasta_content(self, filters):
+        ### TODO: replace label_vocab with one hot represenation
+
+    def get_metadata(self, filters):
         dicts = []
         for file in self.items:
             content = gen_seq_reader(file)
@@ -340,6 +312,35 @@ class Dna2VecList(ItemList):
         self.lengths = [item["len"] for item in list(self.items)]
         return self
 
+    def get(self, i):
+        """The most important method you have to implement is get: this one will enable your custom ItemList
+        to generate an ItemBase from the thing stored in its items array.
+        For instance an ImageList has the following get method:
+        """
+        item = self.items[i]
+        sequence = GSFileProcessor().process_one(item)
+        tokens = GSTokenizeProcessor().process_one(sequence)
+        return Dna2VecProcessor(emb=self.emb, agg=self.agg).process_one(tokens)
+
+    def reconstruct(self, t, x):
+        """This is the method that is called in data.show_batch(), learn.predict() or learn.show_results()
+        to transform a pytorch tensor back in an ItemBase.
+        In a way, it does the opposite of calling ItemBase.data. It should take a tensor t and return the same kind of thing as the get method.
+        In some situations (ImagePoints, ImageBBox for instance) you need to have a look at the corresponding input to rebuild your item.
+        In this case, you should have a second argument called x (don't change that name). For instance, here is the reconstruct method of PointsItemList:
+        """
+        pass
+        # return ImagePoints(FlowField(x.size, t), scale=False)
+
+    def analyze_pred(self, pred, thresh: float = 0.5):
+        """This is the method that is called in learn.predict() or learn.show_results()
+        to transform predictions in an output tensor suitable for reconstruct.
+        For instance we may need to take the maximum argument (for Category) or the predictions
+        greater than a certain threshold (for MultiCategory).
+        It should take a tensor, along with optional kwargs and return a tensor.
+        """
+        return (pred >= thresh).float()
+
 
     def label_from_description(self, labeler:Callable, labels:Collection=None, vocab:dict=None, **kwargs):
         lbls=list(map(labeler, self.descriptions))
@@ -353,7 +354,7 @@ class Dna2VecList(ItemList):
         "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
-        return this.fasta_content(filters)
+        return this.get_metadata(filters)
 
     @classmethod
     def preprocess_for_dna2vec_training(cls, out_path:Union[str, Path], **kwargs):
@@ -369,10 +370,12 @@ class Dna2VecList(ItemList):
 
     @classmethod
     def store_by_label_class(self,path):
-        """store fasta into multi-fasta files label class """
+        """store fasta into multi-fasta files labeled by class """
         pass
 
 if __name__ == '__main__':
+
+    #test DataBunch
 
     # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
     # bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas",
@@ -381,9 +384,18 @@ if __name__ == '__main__':
     #                                      n_cpus=7,agg=partial(np.mean, axis=0))
     # print(bunch)
 
-    Dna2VecList.preprocess_for_dna2vec_training(out_path="/data/genomes/dna2vec_train",
-                                                       path="/data/genomes/GenSeq_fastas",
-                                                       filters=[partial(regex_filter, rx="plasmid", keep=False),
-                                                                partial(seq_len_filter, len=(100000,None))])
+    #test preprocessing for embedding training
+
+    # Dna2VecList.preprocess_for_dna2vec_training(out_path="/data/genomes/dna2vec_train",
+    #                                                    path="/data/genomes/GenSeq_fastas",
+    #                                                    filters=[partial(regex_filter, rx="plasmid", keep=False),
+    #                                                             partial(seq_len_filter, len=(100000,None))])
+
+    #test labeling
+
     # data.label_from_description(lambda x: x.split()[1], from_item_lists=True)
     # print(data)
+
+    #test get item
+    data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas/valid",filters=[partial(regex_filter, rx="plasmid")])
+    print(data.get(0))
