@@ -60,7 +60,7 @@ class GSFileProcessor(PreProcessor):
                 if content[record].id in multi_fastas.loc[row, 'id']:
                     res.append(content[record].seq)
         ds.items = apply_filters(res,self.filters)
-        # return ds.items
+        ds.state = "sequence"
 
 class GSTokenizer():
     def __init__(self, ngram=8, skip=0, n_cpus=1):
@@ -103,6 +103,7 @@ class GSTokenizeProcessor(PreProcessor):
         for i in range(0, len(ds.items), self.chunksize):
             tokens += self.tokenizer.process_all(ds.items[i:i + self.chunksize])
         ds.items = tokens
+        ds.state = "tokens"
 
 class GSVocab(Vocab):
     def __init__(self, itos):
@@ -129,24 +130,33 @@ class GSNumericalizeProcessor(PreProcessor):
         if self.vocab is None: self.vocab = GSVocab.create(ds.items, self.max_vocab, self.min_freq)
         ds.vocab = self.vocab
         super().process(ds)
+        ds.state="numericalized"
 
 
 class Dna2VecProcessor(PreProcessor):
     "`PreProcessor` that tokenizes the texts in `ds`."
 
 
-    def __init__(self, ds: ItemList = None, agg:Callable=sum,
-                 filepath:str='~/.fastai/models/pretrained/dna2vec-20161219-0153-k3to8-100d-10c-29320Mbp-sliding-Xat.w2v',
-                 emb=None):
-        self.agg, self.emb = agg, Word2Vec.load_word2vec_format(filepath) if emb is None else emb
+    def __init__(self, ds: ItemList = None, agg:Callable=sum, emb=None):
+        self.agg = agg
+        self.emb = None if emb is None else emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb)
 
     def process_one(self, tokens):
+        if self.emb is None: raise ValueError("Provide path to embedding or Word2Vec object using  ```emb``` instance variable ")
         tokens= list(filter(lambda x: set(x) == set('ATGC'), tokens))
-        vectors = self.emb[tokens] if len(tokens) > 0 else np.asarray([[0.] * 100, [0.] * 100])
+        vectors = np.asarray([[0.] * 100, [0.] * 100])
+        while len(tokens) > 0:
+            try:
+                vectors = self.emb[tokens]
+                break
+            except KeyError as e:
+                tokens.remove(e.args[0])  # remove k-mer absent in the embedding
         return vectors if self.agg is None else self.agg(vectors)
 
     def process(self, ds):
+        self.emb = ds.emb if (hasattr(ds, "emb") and ds.emb is not None) else self.emb
         ds.items = [self.process_one(item) for item in ds.items]
+        ds.state = "vector"
 
 
 
@@ -277,19 +287,22 @@ class NumericalizedGSList(ItemList):
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
         return cls(items=fasta_content(this,filters), path=path, vocab=vocab, **kwargs)
 
-
+Default={"kmer":8, "cpus":7,
+          "dna2vec": "../data/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v"
+          }
 class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
 
     def __init__(self, items:Iterator, path, ngram:int=8, n_cpus:int=7,
-                 emb:Union[Path,str,Word2Vec]="../data/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
+                 emb:Union[Path,str,Word2Vec]=None,
                  agg:Callable=partial(np.mean, axis=0), #mean values of dna2vec embedding vectors for all k-mers in genome
                 **kwargs):
         super().__init__(items, path, **kwargs)
         self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
-        self.emb = emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb)
+        self.emb = emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb) if emb is not None else None
         self.descriptions,self.ids,self.names,self.files,self.label_vocab,self.lengths= None, None, None, None, None,None
+        self.state = "initial"
 
         ### TODO: replace label_vocab with one hot represenation
 
@@ -313,11 +326,7 @@ class Dna2VecList(ItemList):
         return self
 
     def get(self, i):
-        """The most important method you have to implement is get: this one will enable your custom ItemList
-        to generate an ItemBase from the thing stored in its items array.
-        For instance an ImageList has the following get method:
-        """
-        item = self.items[i]
+        item = self.files[i]
         sequence = GSFileProcessor().process_one(item)
         tokens = GSTokenizeProcessor().process_one(sequence)
         return Dna2VecProcessor(emb=self.emb, agg=self.agg).process_one(tokens)
@@ -373,6 +382,12 @@ class Dna2VecList(ItemList):
         """store fasta into multi-fasta files labeled by class """
         pass
 
+    def __repr__(self):
+        return f"{self.__class__.__name__} {len(self.items)} with itmes, {self.ngram}-mer tokensation\n" \
+            f" {self.emb}, reducer:{self.agg}" \
+            f"\n Head: \n  {self.descriptions[0]}\n  {self.items[0]}" \
+            f"\n Tail: \n  {self.descriptions[-1]}\n  {self.items[-1]}"
+
 if __name__ == '__main__':
 
     #test DataBunch
@@ -397,5 +412,13 @@ if __name__ == '__main__':
     # print(data)
 
     #test get item
-    data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas/valid",filters=[partial(regex_filter, rx="plasmid")])
-    print(data.get(0))
+    # data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas/valid",filters=[partial(regex_filter, rx="plasmid")])
+    # print(data.get(0))
+
+    #test process all itmes
+    data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas", filters=[partial(regex_filter, rx="plasmid",keep=False)],
+                                   emb='/data/genomes/embeddings/dna2vec-20190614-1532-k11to11-100d-10c-4870Mbp-sliding-X6c.w2v')
+    # print(data.get(0)))
+    processors = [GSFileProcessor(),GSTokenizeProcessor(tokenizer=GSTokenizer(ngram=11, skip=0, n_cpus=7)),Dna2VecProcessor()]
+    for p in processors: p.process(data)
+    print(data)
