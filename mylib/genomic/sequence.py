@@ -195,22 +195,21 @@ class Dna2VecDataBunch(DataBunch):
     def from_folder(cls, path: PathOrStr, train: str = 'train', valid: str = 'valid', test: Optional[str] = None,
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None,
                     chunksize: int = 1000, mark_fields: bool = False,
-                    filters:Collection[Callable] = None, labeler:Callable=None, label_vocab:dict=None,  n_cpus: int = 1,
-                    ngram: int = 8, skip: int = 0, agg:Callable=None, **kwargs):
+                    filters:Collection[Callable] = None, labeler:Callable=None, n_cpus: int = 1,
+                    ngram: int = 8, skip: int = 0, agg:Callable=None, emb = None, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
         path = Path(path).absolute()
-        tok = GSTokenizer(ngram=ngram, skip=skip, n_cpus=n_cpus)
+        tok = ifnone(tokenizer, GSTokenizer(ngram=ngram, skip=skip, n_cpus=n_cpus))
         processor = [GSFileProcessor(),
                      GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
-                     Dna2VecProcessor(agg=agg)]
+                     Dna2VecProcessor(emb=emb, agg=agg)]
         train_items = Dna2VecList.from_folder(path=path / train, filters=filters, processor=processor)
         valid_items = Dna2VecList.from_folder(path=path / valid, filters=filters, processor=processor)
         src = ItemLists(path, train_items, valid_items)
-        train_labels = train_items.label_from_description(labeler, label_vocab)
-        valid_labels = valid_items.label_from_description(labeler,train_items.label_vocab)
-                        # ItemList(items=[],ignore_empty=True))
-        src=src.label_from_lists(train_labels=train_labels, valid_labels=valid_labels)
+        tl = train_items.label_from_description(labeler)
+        vl = valid_items.label_from_description(labeler)
+        src=src.label_from_lists(train_labels=tl, valid_labels=vl,**kwargs)
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
 
@@ -287,9 +286,6 @@ class NumericalizedGSList(ItemList):
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
         return cls(items=fasta_content(this,filters), path=path, vocab=vocab, **kwargs)
 
-Default={"kmer":8, "cpus":7,
-          "dna2vec": "../data/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v"
-          }
 class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
@@ -301,7 +297,7 @@ class Dna2VecList(ItemList):
         super().__init__(items, path, **kwargs)
         self.ngram,self.agg,self.n_cpus = ngram,agg,n_cpus
         self.emb = emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb) if emb is not None else None
-        self.descriptions,self.ids,self.names,self.files,self.label_vocab,self.lengths= None, None, None, None, None,None
+        self.descriptions, self.ids, self.names, self.files, self.lengths= None, None, None, None, None
         self.state = "initial"
 
         ### TODO: replace label_vocab with one hot represenation
@@ -325,7 +321,10 @@ class Dna2VecList(ItemList):
         self.lengths = [item["len"] for item in list(self.items)]
         return self
 
-    def get(self, i):
+    def get(self, i) ->Any:
+        return self.items[i]
+
+    def process_one(self, i):
         item = self.files[i]
         sequence = GSFileProcessor().process_one(item)
         tokens = GSTokenizeProcessor().process_one(sequence)
@@ -351,10 +350,9 @@ class Dna2VecList(ItemList):
         return (pred >= thresh).float()
 
 
-    def label_from_description(self, labeler:Callable, labels:Collection=None, vocab:dict=None, **kwargs):
-        lbls=list(map(labeler, self.descriptions))
-        self.label_vocab = {word:number for (word, number) in zip(set(lbls), range(len(set(lbls))))} if vocab is None else vocab
-        return [self.label_vocab[x] for x in lbls]
+    def label_from_description(self, labeler:Callable, labels:Collection=None):
+        lbls=list(map(labeler, self.descriptions)) if labeler is not None else labels
+        return pd.Series(lbls)
 
 
     @classmethod
@@ -392,12 +390,13 @@ if __name__ == '__main__':
 
     #test DataBunch
 
-    # gsu_bunch = GSUDataBunch.from_folder("/data/genomes/GenSeq_fastas/valid")
-    # bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas",
-    #                                      filters=[partial(count_filter, keep=3, sample="last")],
-    #                                      labeler=lambda x: x.split()[1],
-    #                                      n_cpus=7,agg=partial(np.mean, axis=0))
-    # print(bunch)
+    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas",
+                                         filters=[partial(count_filter, keep=3, sample="last")],
+                                         emb="../data/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
+                                         ngram=8, skip=0,
+                                         labeler=lambda x: x.split()[1],
+                                         n_cpus=7,agg=partial(np.mean, axis=0))
+    print(bunch)
 
     #test preprocessing for embedding training
 
@@ -416,9 +415,9 @@ if __name__ == '__main__':
     # print(data.get(0))
 
     #test process all itmes
-    data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas", filters=[partial(regex_filter, rx="plasmid",keep=False)],
-                                   emb='/data/genomes/embeddings/dna2vec-20190614-1532-k11to11-100d-10c-4870Mbp-sliding-X6c.w2v')
-    # print(data.get(0)))
-    processors = [GSFileProcessor(),GSTokenizeProcessor(tokenizer=GSTokenizer(ngram=11, skip=0, n_cpus=7)),Dna2VecProcessor()]
-    for p in processors: p.process(data)
-    print(data)
+    # data = Dna2VecList.from_folder("/data/genomes/GenSeq_fastas", filters=[partial(regex_filter, rx="plasmid",keep=False)],
+    #                                emb='/data/genomes/embeddings/dna2vec-20190614-1532-k11to11-100d-10c-4870Mbp-sliding-X6c.w2v')
+    # # print(data.get(0)))
+    # processors = [GSFileProcessor(),GSTokenizeProcessor(tokenizer=GSTokenizer(ngram=11, skip=0, n_cpus=7)),Dna2VecProcessor()]
+    # for p in processors: p.process(data)
+    # print(data)
