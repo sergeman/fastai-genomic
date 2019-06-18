@@ -196,7 +196,7 @@ class Dna2VecDataBunch(DataBunch):
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None,
                     chunksize: int = 1000, mark_fields: bool = False,
                     filters:Collection[Callable] = None, labeler:Callable=None, n_cpus: int = 1,
-                    ngram: int = 8, skip: int = 0, agg:Callable=None, emb = None, **kwargs):
+                    ngram: int = 8, skip: int = 0, agg:Callable=None, emb = None, one_hot=False, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
         path = Path(path).absolute()
@@ -207,9 +207,11 @@ class Dna2VecDataBunch(DataBunch):
         train_items = Dna2VecList.from_folder(path=path / train, filters=filters, processor=processor)
         valid_items = Dna2VecList.from_folder(path=path / valid, filters=filters, processor=processor)
         src = ItemLists(path, train_items, valid_items)
-        tl = train_items.label_from_description(labeler)
-        vl = valid_items.label_from_description(labeler)
-        src=src.label_from_lists(train_labels=tl, valid_labels=vl,**kwargs)
+        tl,cl = train_items.label_from_description(labeler)
+        vl,_ = valid_items.label_from_description(labels=cl)
+
+        src=src.label_from_lists(train_labels=tl, valid_labels=vl,
+                                 label_cls=partial(MultiCategoryList, classes=cl, one_hot=one_hot))
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
 
@@ -324,11 +326,11 @@ class Dna2VecList(ItemList):
     def get(self, i) ->Any:
         return self.items[i]
 
-    def process_one(self, i):
-        item = self.files[i]
-        sequence = GSFileProcessor().process_one(item)
-        tokens = GSTokenizeProcessor().process_one(sequence)
-        return Dna2VecProcessor(emb=self.emb, agg=self.agg).process_one(tokens)
+    # def process_one(self, i):
+    #     item = self.files[i]
+    #     sequence = GSFileProcessor().process_one(item)
+    #     tokens = GSTokenizeProcessor().process_one(sequence)
+    #     return Dna2VecProcessor(emb=self.emb, agg=self.agg).process_one(tokens)
 
     def reconstruct(self, t, x):
         """This is the method that is called in data.show_batch(), learn.predict() or learn.show_results()
@@ -350,9 +352,15 @@ class Dna2VecList(ItemList):
         return (pred >= thresh).float()
 
 
-    def label_from_description(self, labeler:Callable, labels:Collection=None):
+    def label_from_description(self, labeler:Callable=None, labels:Collection=None):
+        assert labels is not None or labeler is not None, "must provide labels or labeler"
         lbls=list(map(labeler, self.descriptions)) if labeler is not None else labels
-        return pd.Series(lbls)
+        classes = list(set(lbls))
+        def _oh(i, cat_cnt):
+            res=[0]*cat_cnt; res[i] = 1
+            return res
+        l = [_oh(classes.index(x), len(classes)) for x in lbls] if one_hot else lbls
+        return l, classes
 
 
     @classmethod
@@ -395,8 +403,8 @@ if __name__ == '__main__':
                                          emb="../data/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
                                          ngram=8, skip=0,
                                          labeler=lambda x: x.split()[1],
-                                         n_cpus=7,agg=partial(np.mean, axis=0))
-    print(bunch)
+                                         n_cpus=7,agg=partial(np.mean, axis=0),one_hot=True)
+    print(bunch.train_ds.y)
 
     #test preprocessing for embedding training
 
