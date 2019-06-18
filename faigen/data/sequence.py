@@ -207,7 +207,7 @@ class Dna2VecDataBunch(DataBunch):
         valid_items = Dna2VecList.from_folder(path=path / valid, filters=filters, processor=processor)
         src = ItemLists(path, train_items, valid_items)
         tl,cl = train_items.label_from_description(labeler)
-        vl,_ = valid_items.label_from_description(labels=cl)
+        vl,_ = valid_items.label_from_description(labeler, labels=cl)
 
         src=src.label_from_lists(train_labels=tl, valid_labels=vl, classes=cl, one_hot=one_hot)
                                  # label_cls=partial(MultiCategoryList, classes=cl, one_hot=one_hot))
@@ -354,14 +354,15 @@ class Dna2VecList(ItemList):
 
 
     def label_from_description(self, labeler:Callable=None, labels:Collection=None):
-        assert labels is not None or labeler is not None, "must provide labels or labeler"
-        lbls=list(map(labeler, self.descriptions)) if labeler is not None else labels
-        classes = list(set(lbls))
+        assert labeler is not None, "must provide labeler"
+        lbls=list(map(labeler, self.descriptions))
+        classes = list(set(lbls)) if labels is None else labels
         def _oh(i, cat_cnt):
             res=np.zeros(cat_cnt); res[i] = 1.
             return res
         l = pd.Series()
-        if one_hot: [l.set_value(i,_oh(classes.index(x), len(classes))) for i, x in enumerate(lbls)]
+        if one_hot:
+            for i, x in enumerate(lbls): l.at[i] = _oh(classes.index(x), len(classes))
         else: pd.Series(lbls)
         return l, classes
 
