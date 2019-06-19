@@ -195,22 +195,21 @@ class Dna2VecDataBunch(DataBunch):
                     classes: Collection[Any] = None, tokenizer: Tokenizer = None,
                     chunksize: int = 1000, mark_fields: bool = False,
                     filters:Collection[Callable] = None, labeler:Callable=None, n_cpus: int = 1,
-                    ngram: int = 8, skip: int = 0, agg:Callable=None, emb = None, one_hot=False, **kwargs):
+                    ngram: int = 8, skip: int = 0, agg:Callable=None, emb = None, **kwargs):
         "Create a unsupervised learning data bunch from fasta  files in folders."
 
         path = Path(path).absolute()
         tok = ifnone(tokenizer, GSTokenizer(ngram=ngram, skip=skip, n_cpus=n_cpus))
-        processor = [GSFileProcessor(),
+        processors = [GSFileProcessor(),
                      GSTokenizeProcessor(tokenizer=tok, chunksize=chunksize, mark_fields=mark_fields),
                      Dna2VecProcessor(emb=emb, agg=agg)]
-        train_items = Dna2VecList.from_folder(path=path / train, filters=filters, processor=processor)
-        valid_items = Dna2VecList.from_folder(path=path / valid, filters=filters, processor=processor)
+        train_items = Dna2VecList.from_folder(path=path / train, filters=filters, processor=processors)
+        valid_items = Dna2VecList.from_folder(path=path / valid, filters=filters, processor=processors)
         src = ItemLists(path, train_items, valid_items)
         tl,cl = train_items.label_from_description(labeler)
         vl,_ = valid_items.label_from_description(labeler, labels=cl)
 
-        src=src.label_from_lists(train_labels=tl, valid_labels=vl, classes=cl, one_hot=one_hot)
-                                 # label_cls=partial(MultiCategoryList, classes=cl, one_hot=one_hot))
+        src=src.label_from_lists(train_labels=tl, valid_labels=vl,label_cls=CategoryList, classes = cl)#, one_hot=True)
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
 
@@ -327,6 +326,9 @@ class Dna2VecList(ItemList):
     def get(self, i) ->Any:
         return self.items[i]
 
+    def process_one(self, i):
+        return self.items[i]
+
     def produce_one_item(self, i):
         item = self.files[i]
         sequence = GSFileProcessor().process_one(item)
@@ -343,29 +345,25 @@ class Dna2VecList(ItemList):
     #     pass
     #     # return ImagePoints(FlowField(x.size, t), scale=False)
     #
-    # def analyze_pred(self, pred, thresh: float = 0.5):
-    #     """This is the method that is called in learn.predict() or learn.show_results()
-    #     to transform predictions in an output tensor suitable for reconstruct.
-    #     For instance we may need to take the maximum argument (for Category) or the predictions
-    #     greater than a certain threshold (for MultiCategory).
-    #     It should take a tensor, along with optional kwargs and return a tensor.
-    #     """
-    #     return (pred >= thresh).float()
+    def analyze_pred(self, pred, thresh: float = 0.5):
+        """This is the method that is called in learn.predict() or learn.show_results()
+        to transform predictions in an output tensor suitable for reconstruct.
+        For instance we may need to take the maximum argument (for Category) or the predictions
+        greater than a certain threshold (for MultiCategory).
+        It should take a tensor, along with optional kwargs and return a tensor.
+        """
+        return (pred >= thresh).float()
 
 
     def label_from_description(self, labeler:Callable=None, labels:Collection=None):
         assert labeler is not None, "must provide labeler"
         lbls=list(map(labeler, self.descriptions))
-        classes = list(set(lbls)) if labels is None else labels
+        cl = list(set(lbls)) if labels is None else labels
         def _oh(i, cat_cnt):
-            res=np.zeros(cat_cnt); res[i] = 1.
+            res=np.zeros(cat_cnt,dtype=int); res[i] = 1
             return res
-        l = pd.Series()
-        if one_hot:
-            for i, x in enumerate(lbls): l.at[i] = _oh(classes.index(x), len(classes))
-        else: pd.Series(lbls)
-        return l, classes
-
+        # return np.asarray([_oh(cl.index(x), len(cl)) for x in lbls], dtype=int), cl
+        return [cl.index(x) for x in lbls],cl
 
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
