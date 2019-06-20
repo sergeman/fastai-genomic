@@ -10,6 +10,8 @@ import random
 from gensim.models import Word2Vec
 from pathlib import Path
 import os
+from tqdm import tqdm
+from  torch import tensor
 
 # fasta extensions bansed on https://en.wikipedia.org/wiki/FASTA_format
 gen_seq_extensions = ['.fasta', '.fastq', '.fna', '.ffn', '.faa', '.frn','.fa']
@@ -52,8 +54,9 @@ class GSFileProcessor(PreProcessor):
     def process(self, ds: Collection) -> Collection[Seq]:
         df = pd.DataFrame(data=list(ds.items), columns=['file', 'description', "id", "name"])
         multi_fastas = df.groupby("file").agg({"id": list})
+        print ("Reading sequences")
         res = []
-        for row in multi_fastas.index.values:
+        for row in tqdm(multi_fastas.index.values):
             content = gen_seq_reader(str(row))
             for record in content:
                 if content[record].id in multi_fastas.loc[row, 'id']:
@@ -82,8 +85,9 @@ class GSTokenizer():
         "Process a list of `texts`."
         if self.n_cpus <= 1: return self._process_all_1(texts)
         with ProcessPoolExecutor(self.n_cpus) as e:
-            return sum(e.map(self._process_all_1, partition_by_cores(texts, self.n_cpus)), [])
-
+            res = sum(e.map(self._process_all_1,
+                             partition_by_cores(texts, self.n_cpus)), [])
+        return res
 
 
 class GSTokenizeProcessor(PreProcessor):
@@ -98,9 +102,11 @@ class GSTokenizeProcessor(PreProcessor):
 
     def process(self, ds):
         tokens = []
-        if len(ds.items) < self.chunksize: ds.items = self.tokenizer._process_all_1(ds.items); return
+        print("Tokenizing")
+        # if len(ds.items) < self.chunksize: ds.items = self.tokenizer._process_all_1(ds.items); return
         for i in range(0, len(ds.items), self.chunksize):
-            tokens += self.tokenizer.process_all(ds.items[i:i + self.chunksize])
+            advance = min((len(ds.items) - i * self.chunksize), self.chunksize )
+            tokens += self.tokenizer.process_all(ds.items[i:i + advance])
         ds.items = tokens
         ds.state = "tokens"
 
@@ -136,9 +142,10 @@ class Dna2VecProcessor(PreProcessor):
     "`PreProcessor` that tokenizes the texts in `ds`."
 
 
-    def __init__(self, ds: ItemList = None, agg:Callable=sum, emb=None):
-        self.agg = agg
+    def __init__(self, ds: ItemList = None, agg:Callable=sum, emb=None, n_cpu=7):
+        self.agg, self.n_cpu = agg, n_cpu
         self.emb = None if emb is None else emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb)
+
 
     def process_one(self, tokens):
         if self.emb is None: raise ValueError("Provide path to embedding or Word2Vec object using  ```emb``` instance variable ")
@@ -152,9 +159,19 @@ class Dna2VecProcessor(PreProcessor):
                 tokens.remove(e.args[0])  # remove k-mer absent in the embedding
         return vectors if self.agg is None else self.agg(vectors)
 
+    def _process_all_1(self, tokens:Collection[str]) -> List[List[str]]:
+        return [self.process_one(t) for t in tokens]
+
     def process(self, ds):
         self.emb = ds.emb if (hasattr(ds, "emb") and ds.emb is not None) else self.emb
-        ds.items = [self.process_one(item) for item in ds.items]
+        res =[]
+
+        print("Vectorizing")
+        with ProcessPoolExecutor(self.n_cpu) as e:
+            res = sum(e.map(self._process_all_1,
+                             partition_by_cores(ds.items, self.n_cpu)), [])
+        ds.items = res
+        print (len(res))
         ds.state = "vector"
 
 
@@ -196,7 +213,6 @@ class Dna2VecDataBunch(DataBunch):
                     chunksize: int = 1000, mark_fields: bool = False,
                     filters:Collection[Callable] = None, labeler:Callable=None, n_cpus: int = 1,
                     ngram: int = 8, skip: int = 0, agg:Callable=None, emb = None, **kwargs):
-        "Create a unsupervised learning data bunch from fasta  files in folders."
 
         path = Path(path).absolute()
         tok = ifnone(tokenizer, GSTokenizer(ngram=ngram, skip=skip, n_cpus=n_cpus))
@@ -209,7 +225,7 @@ class Dna2VecDataBunch(DataBunch):
         tl,cl = train_items.label_from_description(labeler)
         vl,_ = valid_items.label_from_description(labeler, labels=cl)
 
-        src=src.label_from_lists(train_labels=tl, valid_labels=vl,label_cls=CategoryList, classes = cl)#, one_hot=True)
+        src=src.label_from_lists(train_labels=tl, valid_labels=vl,label_cls=CategoryList, classes = cl)
         if test is not None: src.add_test_folder(path / test)
         return src.databunch(**kwargs)
 
@@ -302,7 +318,8 @@ class Dna2VecList(ItemList):
 
     def get_metadata(self, filters):
         dicts = []
-        for file in self.items:
+        print ("Collecting sequence metadata")
+        for file in tqdm(self.items):
             content = gen_seq_reader(file)
             dicts += [
                 {"file": str(file),
@@ -329,30 +346,10 @@ class Dna2VecList(ItemList):
     def process_one(self, i):
         return self.items[i]
 
-    def produce_one_item(self, i):
-        item = self.files[i]
-        sequence = GSFileProcessor().process_one(item)
-        tokens = GSTokenizeProcessor().process_one(sequence)
-        return Dna2VecProcessor(emb=self.emb, agg=self.agg).process_one(tokens)
+    def analyze_pred(self, pred):
 
-    #  def reconstruct(self, t, x):
-    #     """This is the method that is called in data.show_batch(), learn.predict() or learn.show_results()
-    #     to transform a pytorch tensor back in an ItemBase.
-    #     In a way, it does the opposite of calling ItemBase.data. It should take a tensor t and return the same kind of thing as the get method.
-    #     In some situations (ImagePoints, ImageBBox for instance) you need to have a look at the corresponding input to rebuild your item.
-    #     In this case, you should have a second argument called x (don't change that name). For instance, here is the reconstruct method of PointsItemList:
-    #     """
-    #     pass
-    #     # return ImagePoints(FlowField(x.size, t), scale=False)
-    #
-    def analyze_pred(self, pred, thresh: float = 0.5):
-        """This is the method that is called in learn.predict() or learn.show_results()
-        to transform predictions in an output tensor suitable for reconstruct.
-        For instance we may need to take the maximum argument (for Category) or the predictions
-        greater than a certain threshold (for MultiCategory).
-        It should take a tensor, along with optional kwargs and return a tensor.
-        """
-        return (pred >= thresh).float()
+        _, index = ensor.max()
+        return index
 
 
     def label_from_description(self, labeler:Callable=None, labels:Collection=None):
@@ -362,8 +359,9 @@ class Dna2VecList(ItemList):
         def _oh(i, cat_cnt):
             res=np.zeros(cat_cnt,dtype=int); res[i] = 1
             return res
-        # return np.asarray([_oh(cl.index(x), len(cl)) for x in lbls], dtype=int), cl
-        return [cl.index(x) for x in lbls],cl
+        # return [_oh(cl.index(x), len(cl)) for x in lbls], cl
+        # return [cl.index(x) for x in lbls],cl
+        return lbls,cl
 
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
@@ -373,17 +371,6 @@ class Dna2VecList(ItemList):
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
         return this.get_metadata(filters)
 
-    @classmethod
-    def preprocess_for_dna2vec_training(cls, out_path:Union[str, Path], **kwargs):
-        p = Path(out_path) if isinstance(out_path, str) else out_path
-        data = cls.from_folder(**kwargs)
-        GSFileProcessor().process(data)
-        if not os.path.exists(str(p)):
-            os.makedirs(str(p))
-        for i, seq in enumerate(iter(data.items)):
-            record = SeqRecord(seq,id=data.ids[i], name=data.names[i],description=data.descriptions[i])
-            with open(p / f"{data.ids[i]}.fasta", "w") as output:
-                output.write(record.format("fasta"))
 
     @classmethod
     def store_by_label_class(self,path):
@@ -399,12 +386,13 @@ class Dna2VecList(ItemList):
 if __name__ == '__main__':
 
     #test DataBunch
-
-    bunch = Dna2VecDataBunch.from_folder("/data/genomes/GenSeq_fastas",
-                                         filters=[partial(count_filter, keep=3, sample="last")],
+    DB = "/home/serge/database/data/genomes/ncbi-genomes-2019-04-07/Bacillus"
+    # DB="/data/genomes/GenSeq_fastas"
+    bunch = Dna2VecDataBunch.from_folder(DB,
+                                         filters=None,  #[partial(count_filter, keep=3, sample="last")],
                                          emb="../pretrained/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
                                          ngram=8, skip=0,
-                                         labeler=lambda x: x.split()[1],
+                                         labeler=lambda x: " ".join(x.split()[1:3]),
                                          n_cpus=7,agg=partial(np.mean, axis=0),one_hot=True)
     print(bunch.train_ds.y)
 
