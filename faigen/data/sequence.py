@@ -60,7 +60,6 @@ class GSFileProcessor(PreProcessor):
     def process(self, ds: Collection) -> Collection[Seq]:
         df = pd.DataFrame(data=list(ds.items), columns=['file', 'description', "id", "name"])
         multi_fastas = df.groupby("file").agg({"id": list})
-        print ("Reading sequences")
         res = []
         for row in tqdm(multi_fastas.index.values):
             content = gen_seq_reader(str(row))
@@ -108,7 +107,6 @@ class GSTokenizeProcessor(PreProcessor):
 
     def process(self, ds):
         tokens = []
-        print("Tokenizing")
         # if len(ds.items) < self.chunksize: ds.items = self.tokenizer._process_all_1(ds.items); return
         for i in range(0, len(ds.items), self.chunksize):
             advance = min((len(ds.items) - i * self.chunksize), self.chunksize )
@@ -172,12 +170,10 @@ class Dna2VecProcessor(PreProcessor):
         self.emb = ds.emb if (hasattr(ds, "emb") and ds.emb is not None) else self.emb
         res =[]
 
-        print("Vectorizing")
         with ProcessPoolExecutor(self.n_cpu) as e:
             res = sum(e.map(self._process_all_1,
                              partition_by_cores(ds.items, self.n_cpu)), [])
         ds.items = res
-        print (len(res))
         ds.state = "vector"
 
 
@@ -334,7 +330,6 @@ class Dna2VecList(ItemList):
 
     def get_metadata(self, filters):
         dicts = []
-        print ("Collecting sequence metadata")
         for file in tqdm(self.items):
             content = gen_seq_reader(file)
             dicts += [
@@ -423,7 +418,7 @@ class Dna2VecList(ItemList):
         pass
 
     def __repr__(self):
-        return f"{self.__class__.__name__} {len(self.items)} with itmes, {self.ngram}-mer tokensation\n" \
+        return f"{self.__class__.__name__} {len(self.items)}  items; {self.ngram}-mer tokensation\n" \
             f" {self.emb}, reducer:{self.agg}" \
             f"\n Head: \n  {self.descriptions[0]}\n  {self.items[0]}" \
             f"\n Tail: \n  {self.descriptions[-1]}\n  {self.items[-1]}"
