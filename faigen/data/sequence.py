@@ -12,11 +12,14 @@ from pathlib import Path
 import os
 from tqdm import tqdm
 from  torch import tensor
+import gzip
+from mimetypes import guess_type
+from functools import partial
 
 # fasta extensions bansed on https://en.wikipedia.org/wiki/FASTA_format
-gen_seq_extensions = ['.fasta', '.fastq', '.fna', '.ffn', '.faa', '.frn','.fa']
-gen_seq_formats = {"fasta": "fasta", "fna": "fasta", "ffn": "fasta", "faa": "fasta", "frn": "fasta","fa":"fasta",
-                   "fastq": "fastq"}
+gen_seq_extensions = ['.fasta', '.fna', '.ffn', '.faa', '.frn','.fa',".gz"]
+
+
 
 def ifnone(a: Any, b: Any) -> Any:
     "`a` if `a` is not None, otherwise `b`."
@@ -25,8 +28,11 @@ def ifnone(a: Any, b: Any) -> Any:
 
 def gen_seq_reader(fn: PathOrStr):
     "Read the sequences in `fn`."
+
     ext = str(fn).split(".")[-1]
-    return SeqIO.to_dict(SeqIO.parse(fn, gen_seq_formats[ext]))
+    _open = partial(gzip.open, mode='rt') if ext.lower() == "gz" else open
+    with _open(fn) as f:
+        return SeqIO.to_dict(SeqIO.parse(f, 'fasta'))
 
 def seq_record(fn: PathOrStr, record_id:str):
     content = gen_seq_reader(fn)
@@ -302,6 +308,16 @@ class NumericalizedGSList(ItemList):
         this = super().from_folder(path=path, extensions=extensions, **kwargs)
         return cls(items=fasta_content(this,filters), path=path, vocab=vocab, **kwargs)
 
+def _get_files(parent, p, f, extensions):
+    "Return  sequence of files in a folder files including gzipped format for given extensions"
+    p = Path(p)#.relative_to(parent)
+    if isinstance(extensions,str): extensions = [extensions]
+    low_extensions = [e.lower() for e in extensions] if extensions is not None else None
+    res = [p/o for o in f if not o.startswith('.')
+           and (extensions is None or f'.{o.split(".")[-1].lower()}' in low_extensions
+           or (o.split(".")[-1].lower() == "gz" and  f'.{o.split(".")[-2].lower()}' in low_extensions))]
+    return res
+
 class Dna2VecList(ItemList):
     "`ItemList` of Kmer tokens vectorized by dna2vec embedding"
     _bunch, _processor = Dna2VecDataBunch, [GSFileProcessor, GSTokenizeProcessor,Dna2VecProcessor]
@@ -351,6 +367,34 @@ class Dna2VecList(ItemList):
         _, index = ensor.max()
         return index
 
+    @classmethod
+    def get_files(cls, path: PathOrStr, extensions: Collection[str] = None, recurse: bool = False,
+                  include: Optional[Collection[str]] = None) -> FilePathList:
+        "Return list of files in `path` that have a suffix in `extensions`; optionally `recurse`."
+
+        def _get_files(parent, p, f, extensions):
+            "Return  sequence of files in a folder files including gzipped format for given extensions"
+            p = Path(p)  # .relative_to(parent)
+            if isinstance(extensions, str): extensions = [extensions]
+            low_extensions = [e.lower() for e in extensions] if extensions is not None else None
+            res = [p / o for o in f if not o.startswith('.')
+                   and (extensions is None or f'.{o.split(".")[-1].lower()}' in low_extensions
+                        or (o.split(".")[-1].lower() == "gz" and f'.{o.split(".")[-2].lower()}' in low_extensions))]
+            return res
+
+        if recurse:
+            res = []
+            for i, (p, d, f) in enumerate(os.walk(path)):
+                # skip hidden dirs
+                if include is not None and i == 0:
+                    d[:] = [o for o in d if o in include]
+                else:
+                    d[:] = [o for o in d if not o.startswith('.')]
+                res += _get_files(path, p, f, extensions)
+            return res
+        else:
+            f = [o.name for o in os.scandir(path) if o.is_file()]
+            return _get_files(path, path, f, extensions)
 
     def label_from_description(self, labeler:Callable=None, labels:Collection=None):
         assert labeler is not None, "must provide labeler"
@@ -363,12 +407,13 @@ class Dna2VecList(ItemList):
         # return [cl.index(x) for x in lbls],cl
         return lbls,cl
 
+
     @classmethod
     def from_folder(cls, path: PathOrStr = '.', extensions: Collection[str] = None,
-                    filters:Collection[Callable]=None, ngram:int=8, n_cpus=1, agg:Callable=None, **kwargs) -> ItemList:
-        "Get the list of files in `path` that have an image suffix. `recurse` determines if we search subfolders."
+                    filters:Collection[Callable]=None, ngram:int=8, n_cpus=1, agg:Callable=None, recurse:bool = False, **kwargs) -> ItemList:
+        "Get the list of files in `path` that have an sequence suffix. `recurse` determines if we search subfolders."
         extensions = ifnone(extensions, gen_seq_extensions)
-        this = super().from_folder(path=path, extensions=extensions, **kwargs)
+        this = cls(items=cls.get_files(path, extensions, recurse),path=path, **kwargs)
         return this.get_metadata(filters)
 
 
@@ -386,15 +431,15 @@ class Dna2VecList(ItemList):
 if __name__ == '__main__':
 
     #test DataBunch
-    DB = "/home/serge/database/data/genomes/ncbi-genomes-2019-04-07/Bacillus"
-    # DB="/data/genomes/GenSeq_fastas"
-    bunch = Dna2VecDataBunch.from_folder(DB,
-                                         filters=None,  #[partial(count_filter, keep=3, sample="last")],
-                                         emb="../pretrained/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
-                                         ngram=8, skip=0,
-                                         labeler=lambda x: " ".join(x.split()[1:3]),
-                                         n_cpus=7,agg=partial(np.mean, axis=0),one_hot=True)
-    print(bunch.train_ds.y)
+    # DB = "/home/serge/database/data/genomes/ncbi-genomes-2019-04-07/Bacillus"
+    # # DB="/data/genomes/GenSeq_fastas"
+    # bunch = Dna2VecDataBunch.from_folder(DB,
+    #                                      filters=None,  #[partial(count_filter, keep=3, sample="last")],
+    #                                      emb="../pretrained/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v",
+    #                                      ngram=8, skip=0,
+    #                                      labeler=lambda x: " ".join(x.split()[1:3]),
+    #                                      n_cpus=7,agg=partial(np.mean, axis=0),one_hot=True)
+    # print(bunch.train_ds.y)
 
     #test preprocessing for embedding training
 
@@ -419,3 +464,8 @@ if __name__ == '__main__':
     # processors = [GSFileProcessor(),GSTokenizeProcessor(tokenizer=GSTokenizer(ngram=11, skip=0, n_cpus=7)),Dna2VecProcessor()]
     # for p in processors: p.process(data)
     # print(data)
+
+    #test gzipped fastas
+    data = Dna2VecList.from_folder("/data/genomes/gzipped", filters=[],
+                                    emb='/data/genomes/embeddings/dna2vec-20190611-1940-k8to8-100d-10c-4870Mbp-sliding-LmP.w2v')
+    print(data.get(0))
