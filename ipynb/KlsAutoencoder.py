@@ -58,6 +58,6 @@ class Encoder():
         e.eval()
         self.e = e
 
-    def encode(self,data:Collection):
+    def transform(self,data:Collection):
         """transform ```data``` to latent representaion"""
         return self.e.forward(tensor(data).double()).cpu().detach().numpy()

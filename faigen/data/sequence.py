@@ -108,8 +108,9 @@ class GSTokenizeProcessor(PreProcessor):
     def process(self, ds):
         tokens = []
         # if len(ds.items) < self.chunksize: ds.items = self.tokenizer._process_all_1(ds.items); return
-        for i in range(0, len(ds.items), self.chunksize):
-            advance = min((len(ds.items) - i * self.chunksize), self.chunksize )
+        chunks = len(ds.items) // self.chunksize + 1
+        for i in tqdm(range(chunks)):
+            advance = min((len(ds.items) - i * self.chunksize), self.chunksize)
             tokens += self.tokenizer.process_all(ds.items[i:i + advance])
         ds.items = tokens
         ds.state = "tokens"
@@ -146,7 +147,7 @@ class Dna2VecProcessor(PreProcessor):
     "`PreProcessor` that tokenizes the texts in `ds`."
 
 
-    def __init__(self, ds: ItemList = None, agg:Callable=sum, emb=None, n_cpu=7):
+    def __init__(self, ds: ItemList = None, agg:Callable=partial(np.mean, axis=0), emb=None, n_cpu=7):
         self.agg, self.n_cpu = agg, n_cpu
         self.emb = None if emb is None else emb if isinstance(emb, Word2Vec) else Word2Vec.load_word2vec_format(emb)
 
@@ -157,7 +158,7 @@ class Dna2VecProcessor(PreProcessor):
         vectors = np.asarray([[0.] * 100, [0.] * 100])
         while len(tokens) > 0:
             try:
-                vectors = self.emb[tokens]
+                vectors = np.asarray(self.emb[tokens])
                 break
             except KeyError as e:
                 tokens.remove(e.args[0])  # remove k-mer absent in the embedding
